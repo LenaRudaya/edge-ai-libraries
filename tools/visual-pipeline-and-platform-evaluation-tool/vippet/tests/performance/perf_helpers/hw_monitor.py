@@ -99,6 +99,9 @@ class HardwareMonitor:
         hw_stats = monitor.stop()   # returns aggregated dict
     """
 
+    _warned_no_samples: bool = False
+    """Class-wide: warn about an empty metrics stream only once per process."""
+
     def __init__(
         self,
         metrics_url: str = "http://localhost/metrics/stream",
@@ -125,6 +128,17 @@ class HardwareMonitor:
             self._thread.join(timeout=max(self._interval * 2, 10))
         stats = self._aggregate()
         logger.debug("HardwareMonitor stopped (%d samples)", len(self._samples))
+        if not self._samples and not HardwareMonitor._warned_no_samples:
+            HardwareMonitor._warned_no_samples = True
+            logger.warning(
+                "No hardware metrics collected from %s. Why: the metrics "
+                "endpoint is unreachable, not streaming, or returned no known "
+                "metrics. What to do: check --metrics-url (VIPPET_METRICS_URL) "
+                "and that the metrics service is running (`docker compose ps`); "
+                "until then HW KPI columns in the reports stay empty. This "
+                "warning is shown once per session.",
+                self._metrics_url,
+            )
         return stats
 
     def _loop(self) -> None:

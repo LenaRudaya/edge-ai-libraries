@@ -175,14 +175,22 @@ class ResultExporter:
         self.formats = formats or ["json", "csv"]
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def export(self, result: dict[str, Any]) -> None:
+    def export(self, result: dict[str, Any]) -> list[tuple[str, Path]]:
+        """Write every configured format; return ``[(format, path), ...]``."""
         benchmark_id = result.get("benchmark_id", "unknown")
+        written: list[tuple[str, Path]] = []
 
         for fmt in self.formats:
             if fmt == "json":
-                JSONReporter.save(result, self.output_dir / f"{benchmark_id}.json")
+                path = self.output_dir / f"{benchmark_id}.json"
+                JSONReporter.save(result, path)
             elif fmt == "csv":
-                CSVReporter.save(result, self.output_dir / f"{benchmark_id}.csv")
+                path = self.output_dir / f"{benchmark_id}.csv"
+                CSVReporter.save(result, path)
+            else:
+                continue
+            written.append((fmt.upper(), path))
+        return written
 
 
 # ---------------------------------------------------------------------------

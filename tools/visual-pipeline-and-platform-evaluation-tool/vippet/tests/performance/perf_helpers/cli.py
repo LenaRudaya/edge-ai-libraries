@@ -26,11 +26,19 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
+from .console import (
+    discovery_failure_message,
+    format_hardware,
+    format_matrix,
+    format_settings,
+)
 from .matrix import Matrix, MatrixFilters
 from .preflight import FATAL_PREFLIGHT_EXIT_CODE, PreflightError, wait_for_vippet_ready
 from .settings import (
     ENV_CONFIG_FILE,
+    ENV_CONFIG_ORIGIN,
     PERF_DIR,
+    SETTINGS_REMEDY,
     SPECS,
     ResolvedSettings,
     SettingSpec,
@@ -169,95 +177,6 @@ def _ensure_import_paths() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
-    cells = [list(map(str, headers))] + [[str(c) for c in row] for row in rows]
-    widths = [max(len(row[i]) for row in cells) for i in range(len(headers))]
-    lines = []
-    for n, row in enumerate(cells):
-        lines.append("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
-        if n == 0:
-            lines.append("  ".join("-" * w for w in widths))
-    return "\n".join(lines)
-
-
-def format_settings(settings: ResolvedSettings) -> str:
-    rows = [
-        (spec.key, _render(settings[spec.key]), settings.sources[spec.key])
-        for spec in SPECS
-    ]
-    return f"Config file: {settings.config_path}\n" + _table(
-        ("setting", "value", "source"), rows
-    )
-
-
-def _render(value: Any) -> str:
-    if isinstance(value, list):
-        return ",".join(map(str, value)) if value else "(none)"
-    return str(value)
-
-
-def format_matrix(matrix: Matrix) -> str:
-    """Render the dry-run report: matrix, exclusions and run-time skips."""
-    out: list[str] = []
-    families = ", ".join(matrix.available_families) or "(none)"
-    out.append(f"Host device families: {families}")
-    streams = ", ".join(map(str, matrix.stream_counts))
-
-    rows = matrix.rows()
-    will_run = [
-        (case.pipeline_id, case.device_family, s, case.case_id + f"_x{s}")
-        for case, s in rows
-        if case.pipeline_id not in matrix.missing_models
-    ]
-    out.append("")
-    out.append(
-        f"Matrix: {len(will_run)} run(s) = pipeline x variant x streams [{streams}]"
-    )
-    out.append(
-        _table(("pipeline", "variant", "streams", "test id"), will_run)
-        if will_run
-        else "  (empty)"
-    )
-
-    out.append("")
-    out.append(f"Excluded: {len(matrix.excluded)} pipeline/variant(s)")
-    out.append(
-        _table(
-            ("pipeline", "variant", "reason", "detail"),
-            [
-                (
-                    e.pipeline_id or e.pipeline_name or "?",
-                    e.variant,
-                    e.reason.value,
-                    e.detail,
-                )
-                for e in matrix.excluded
-            ],
-        )
-        if matrix.excluded
-        else "  (none)"
-    )
-
-    skipped = [
-        (
-            case.pipeline_id,
-            case.device_family,
-            s,
-            ", ".join(matrix.missing_models[case.pipeline_id]),
-        )
-        for case, s in rows
-        if case.pipeline_id in matrix.missing_models
-    ]
-    out.append("")
-    out.append(f"Skipped at run time: missing_models: {len(skipped)} run(s)")
-    out.append(
-        _table(("pipeline", "variant", "streams", "missing models"), skipped)
-        if skipped
-        else "  (none)"
-    )
-    return "\n".join(out)
-
-
 def _default_discover(settings: ResolvedSettings) -> Matrix:
     # helpers.config reads VIPPET_BASE_URL at import time; export first.
     os.environ.update(settings_env(settings))
@@ -288,16 +207,19 @@ def run_dry_run(
             settings["vippet.timeout"],
             report=lambda line: print(line, file=stderr),
         )
-        matrix = discover(settings)
     except PreflightError as exc:
         print(f"error: {exc}", file=stderr)
         return FATAL_PREFLIGHT_EXIT_CODE
+    try:
+        matrix = discover(settings)
     except Exception as exc:  # report any discovery failure, never crash
         print(
-            f"error: pipeline discovery failed: {type(exc).__name__}: {exc}",
+            f"error: {discovery_failure_message(settings['vippet.base_url'], exc)}",
             file=stderr,
         )
         return FATAL_PREFLIGHT_EXIT_CODE
+    print(format_hardware(matrix), file=stdout)
+    print("", file=stdout)
     print(format_matrix(matrix), file=stdout)
     return EXIT_OK
 
@@ -310,8 +232,10 @@ def run_dry_run(
 def run_report_only(settings: ResolvedSettings, *, stderr: TextIO | None = None) -> int:
     """Placeholder: report regeneration will be implemented within ITEP-96716."""
     print(
-        "error: --report-only is not yet implemented "
-        f"(results dir: {settings['results.output_dir']})",
+        "error: --report-only is not yet implemented, so no report was "
+        f"regenerated (results dir: {settings['results.output_dir']}). "
+        "What to do: open the JSON/CSV/HTML files already written under that "
+        "directory, or run without --report-only to produce new results.",
         file=stderr or sys.stderr,
     )
     return EXIT_NOT_IMPLEMENTED
@@ -345,6 +269,7 @@ def run_pytest(
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(settings.to_yaml())
         env[ENV_CONFIG_FILE] = config_file
+        env[ENV_CONFIG_ORIGIN] = str(settings.config_path)
         completed = runner(build_pytest_command(pytest_args), env=env, check=False)
         return int(completed.returncode)
     finally:
@@ -368,7 +293,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cli_overrides=cli_overrides(namespace),
         )
     except SettingsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {exc}. {SETTINGS_REMEDY}", file=sys.stderr)
         return EXIT_USAGE
 
     if namespace.dry_run:

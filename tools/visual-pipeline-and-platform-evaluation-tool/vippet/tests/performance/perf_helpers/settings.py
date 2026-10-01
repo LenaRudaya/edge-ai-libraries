@@ -35,6 +35,9 @@ DEFAULT_PRESET: str = "default"
 # preset name or a path).
 ENV_CONFIG_FILE: str = "PERF_CONFIG_FILE"
 ENV_CONFIG: str = "PERF_CONFIG"
+# Set by the CLI next to PERF_CONFIG_FILE: the config the user selected, for
+# display only (never used to load settings).
+ENV_CONFIG_ORIGIN: str = "PERF_CONFIG_ORIGIN"
 
 _PRESET_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -49,6 +52,13 @@ SOURCE_CLI = "cli"
 
 class SettingsError(ValueError):
     """Raised when a config file or a setting value is invalid."""
+
+
+SETTINGS_REMEDY: str = (
+    "What to do: fix the value in the named source (YAML file, env var or "
+    "CLI flag); run 'python -m perf_helpers.cli --help' for accepted values "
+    "and see the Configuration section of vippet/tests/performance/README.md."
+)
 
 
 # --------------------------------------------------------------------------- #

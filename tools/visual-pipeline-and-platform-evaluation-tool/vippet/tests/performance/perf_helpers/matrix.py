@@ -84,6 +84,8 @@ class Matrix:
     """``{pipeline_id: [model display names]}`` for *included* pipelines only."""
     stream_counts: list[int] = field(default_factory=list)
     available_families: list[str] = field(default_factory=list)
+    devices: dict[str, list[str]] = field(default_factory=dict)
+    """``{family: [full device names]}`` for supported families on the host."""
 
     def rows(self) -> list[tuple[MatrixCase, int]]:
         """Return the full (case, stream_count) cross-product."""
@@ -96,10 +98,18 @@ def make_case_id(pipeline_name: str, variant_name: str) -> str:
     return f"{slug}_{variant_name.lower()}"
 
 
-def _available_families(devices: Iterable[Mapping[str, Any]]) -> set[str]:
-    return {
-        str(device.get("device_family") or "").upper() for device in devices
-    } & SUPPORTED_DEVICE_FAMILIES
+def _device_names(devices: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """Group supported devices by family, keeping reported names in order."""
+    names: dict[str, list[str]] = {}
+    for device in devices:
+        family = str(device.get("device_family") or "").upper()
+        if family not in SUPPORTED_DEVICE_FAMILIES:
+            continue
+        bucket = names.setdefault(family, [])
+        name = str(device.get("full_device_name") or "").strip()
+        if name and name not in bucket:
+            bucket.append(name)
+    return names
 
 
 def build_matrix(
@@ -115,7 +125,8 @@ def build_matrix(
     (``pipelines`` filter, ``skip_pipelines``) run first and produce a
     single row with variant ``(all)``.
     """
-    available = _available_families(devices)
+    device_names = _device_names(devices)
+    available = set(device_names)
     allowed_pipelines = None if filters.pipelines == "*" else set(filters.pipelines)
     skip_pipelines = {p.lower() for p in filters.skip_pipelines}
     skip_variants = {v.upper() for v in filters.skip_variants}
@@ -124,6 +135,7 @@ def build_matrix(
     matrix = Matrix(
         stream_counts=list(filters.stream_counts),
         available_families=sorted(available),
+        devices={family: device_names[family] for family in sorted(available)},
     )
 
     for pipeline in pipelines:

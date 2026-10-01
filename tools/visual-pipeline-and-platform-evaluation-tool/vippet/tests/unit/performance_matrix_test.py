@@ -122,5 +122,23 @@ class TestBuildMatrix(unittest.TestCase):
         self.assertTrue(matrix.excluded)
 
 
+class TestMatrixDevices(unittest.TestCase):
+    def test_device_names_grouped_by_supported_family(self) -> None:
+        devices = [
+            {"device_family": "cpu", "full_device_name": "Core Ultra 7"},
+            {"device_family": "GPU", "full_device_name": "Arc A770"},
+            {"device_family": "GPU", "full_device_name": "Arc A770"},
+            {"device_family": "GPU", "full_device_name": "Iris Xe"},
+            {"device_family": "NPU"},
+            {"device_family": "FPGA", "full_device_name": "ignored"},
+        ]
+        matrix = build_matrix([], devices, {}, MatrixFilters())
+        self.assertEqual(matrix.available_families, ["CPU", "GPU", "NPU"])
+        self.assertEqual(
+            matrix.devices,
+            {"CPU": ["Core Ultra 7"], "GPU": ["Arc A770", "Iris Xe"], "NPU": []},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

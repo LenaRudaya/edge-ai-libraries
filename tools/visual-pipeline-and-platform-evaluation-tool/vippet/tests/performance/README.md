@@ -22,6 +22,66 @@ make test-performance PERF_CONFIG=quick PERF_ARGS="--streams 1,5 --pipelines obj
 
 `make test-performance` delegates to the CLI below.
 
+### Normal run console output
+
+A normal run (CLI or direct pytest) prints, in this order:
+
+1. **Header** — effective settings (value + source) and the ViPPET readiness
+   check (`GET /health`, then `GET /status` until ready).
+2. **Discovered hardware** — the CPU/GPU/NPU device families and names ViPPET
+   reported, right after collection.
+3. **Benchmark matrix** — the same pipeline × variant × streams table, the
+   exclusions and the `missing_models` skips shown by `--dry-run`.
+4. **Per-test status** — one `[perf]` line per finished test with its
+   outcome, FPS, duration and a short error if it failed. These lines are in
+   addition to pytest's own `-v`/`-q` output.
+5. **Summary** — total/success/failed/skipped counts and duration.
+6. **Artefact paths** — the JSON/CSV/HTML files and the `latest` symlink, or a
+   clear reason why nothing was written.
+
+```text
+ViPPET performance benchmark
+Config file: default (resolved with env vars and CLI flags by perf_helpers.cli; ...)
+setting              value                       source
+-------------------  --------------------------  ------
+vippet.base_url      http://localhost/api/v1     default
+...
+Readiness:
+  [pre-flight] GET http://localhost/api/v1/health: OK (HTTP 200, healthy=True)
+  [pre-flight] GET http://localhost/api/v1/status: READY (HTTP 200, status='ready', ...)
+
+---------------------------- discovered hardware -----------------------------
+Host device families: CPU, GPU
+family  device
+------  -----------------------------
+CPU     Intel(R) Core(TM) Ultra 7
+GPU     Intel(R) Arc(TM) Graphics
+
+----------------------------- benchmark matrix --------------------------------
+Matrix: 4 run(s) = pipeline x variant x streams [1, 3]
+...
+Selected for this session: 4 test(s) (after -k/-m and other pytest filters)
+
+[perf] PASSED   object_detection_cpu_x1  total_fps=28.40  per_stream_fps=28.40  duration=12.3s  job_id=...
+...
+
+======================= ViPPET performance summary ========================
+Benchmark runs: 4 total, 4 success, 0 failed, 0 skipped in 51.2s
+...
+Artefacts:
+  JSON    results/bench_20261001_101500/bench_20261001_101500.json
+  CSV     results/bench_20261001_101500/bench_20261001_101500.csv
+  HTML    results/bench_20261001_101500/bench_20261001_101500.html
+  latest  results/latest
+```
+
+If ViPPET is unreachable or never becomes ready, or pipeline discovery fails
+after readiness passes, the run stops before any test with exit code `2` and
+an actionable "what happened / why / what to do" message (same as
+`--dry-run`). Test-level failures (job errors, HTTP errors, timeouts) still
+fail only that test and are reported the same way in the `[perf]` line and in
+pytest's `FAILURES` section.
+
 ### CLI
 
 Run from the project root. `PYTHONPATH` must include `vippet/tests/performance`:
@@ -85,7 +145,9 @@ smart-parking     (all)    skip_pipelines      listed in benchmark.filters.skip_
 If ViPPET cannot be reached, `--dry-run` exits with `2`. It exits with `0` in every
 other case.
 
-`--collect-only` lists the collected tests, but it does not say why a case was left out.
+`--collect-only` still lists the collected tests without exclusion reasons, but a
+normal run (and `--dry-run`) now always prints the matrix and exclusions in the
+console, so `--collect-only` is no longer the only way to preview it.
 
 #### Report only
 

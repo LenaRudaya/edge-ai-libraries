@@ -18,6 +18,7 @@ from tests.performance.perf_helpers.matrix import MatrixFilters, build_matrix
 from tests.performance.perf_helpers.preflight import PreflightError
 from tests.performance.perf_helpers.settings import (
     ENV_CONFIG_FILE,
+    ENV_CONFIG_ORIGIN,
     SPECS,
     resolve_settings,
 )
@@ -136,6 +137,7 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual(rc, 0)
         preflight.assert_called_once()
         text = out.getvalue()
+        self.assertIn("Host device families: CPU", text)
         self.assertIn("Matrix: 2 run(s)", text)
         self.assertIn("object_detection_cpu_x1", text)
         self.assertIn("object_detection_cpu_x3", text)
@@ -168,14 +170,18 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("down", err.getvalue())
 
     def test_discovery_failure_exits_2(self) -> None:
+        err = io.StringIO()
         rc = cli.run_dry_run(
             self.settings,
             discover=Mock(side_effect=RuntimeError("boom")),
             preflight=Mock(),
             stdout=io.StringIO(),
-            stderr=io.StringIO(),
+            stderr=err,
         )
         self.assertEqual(rc, 2)
+        self.assertIn("RuntimeError: boom", err.getvalue())
+        self.assertIn("Why:", err.getvalue())
+        self.assertIn("What to do:", err.getvalue())
 
 
 class TestReportOnly(unittest.TestCase):
@@ -214,6 +220,7 @@ class TestRunPytest(unittest.TestCase):
         self.assertEqual(seen["cmd"][-2:], ["-k", "x"])
         self.assertIn(str(cli.PERF_DIR), seen["cmd"])
         self.assertEqual(seen["env"]["VIPPET_BASE_URL"], "http://cli:9/api/v1")
+        self.assertEqual(seen["env"][ENV_CONFIG_ORIGIN], str(settings.config_path))
         self.assertEqual(seen["reloaded"]["benchmark.stream_counts"], [7])
         self.assertEqual(dict(seen["reloaded"].values), dict(settings.values))
         if os.name == "posix":

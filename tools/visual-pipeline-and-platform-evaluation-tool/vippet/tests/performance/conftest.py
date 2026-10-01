@@ -1,14 +1,23 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures for VIPPET performance benchmark tests."""
+"""Shared fixtures and console reporting for VIPPET performance benchmark tests.
+
+Console output of a normal run, in order:
+
+1. header: effective settings and ViPPET readiness (``pytest_report_header``)
+2. discovered hardware and the benchmark matrix (``pytest_collection_finish``)
+3. one ``[perf]`` status line per test (``pytest_runtest_logreport``)
+4. benchmark summary and artefact paths (``pytest_terminal_summary``)
+"""
 
 import dataclasses
 import logging
 import os
+import re
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +25,7 @@ from typing import Any
 import pytest
 import httpx
 
-from perf_helpers.settings import SettingsError
+from perf_helpers.settings import ENV_CONFIG_ORIGIN, SETTINGS_REMEDY, SettingsError
 
 try:
     from perf_helpers.config import (
@@ -39,7 +48,10 @@ except SettingsError as exc:
     # while importing a conftest (including pytest's Exit) into a
     # ConftestImportFailure and prints a traceback with exit code 4.
     # SystemExit is a BaseException and is not wrapped.
-    print(f"error: invalid performance config: {exc}", file=sys.stderr)
+    print(
+        f"error: invalid performance config: {exc}. {SETTINGS_REMEDY}",
+        file=sys.stderr,
+    )
     raise SystemExit(2) from None
 
 # Propagate perf config to env vars consumed by functional helpers. This must
@@ -51,50 +63,30 @@ os.environ.setdefault("VIPPET_BASE_URL", BASE_URL)
 os.environ.setdefault("VIPPET_JOB_TIMEOUT_SECONDS", str(POLL_TIMEOUT))
 os.environ.setdefault("VIPPET_JOB_POLL_INTERVAL", str(POLL_INTERVAL))
 
-from helpers.api_helpers import fetch_devices  # noqa: E402
 from helpers.pipeline_case_helpers import (  # noqa: E402
     PipelineCase,
     wrap_cases_for_pytest,
 )
+from perf_helpers.console import (  # noqa: E402
+    discovery_failure_message,
+    format_artefacts,
+    format_hardware,
+    format_matrix,
+    format_results_summary,
+    format_settings,
+    format_test_line,
+    no_cases_reason,
+)
 from perf_helpers.discovery import discover_matrix  # noqa: E402
 from perf_helpers.hw_monitor import HardwareMonitor  # noqa: E402
-from perf_helpers.matrix import MatrixFilters  # noqa: E402
-from perf_helpers.preflight import run_preflight_or_exit  # noqa: E402
+from perf_helpers.matrix import Matrix, MatrixFilters  # noqa: E402
+from perf_helpers.preflight import (  # noqa: E402
+    FATAL_PREFLIGHT_EXIT_CODE,
+    run_preflight_or_exit,
+)
 from perf_helpers.reporters import ResultExporter, generate_html_report  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-_NO_CASES_REASON = (
-    "No pipeline/variant test cases were discovered from VIPPET API. "
-    "Ensure API reachability and at least one supported device (CPU/GPU/NPU)."
-)
-
-
-def _collect_system_info(session: httpx.Client | None = None) -> dict[str, Any]:
-    """Collect system details from VIPPET APIs for the benchmark report."""
-
-    devices_info: dict[str, str] = {}
-    if session is not None:
-        try:
-            devices = fetch_devices(session)  # type: ignore[arg-type]
-            for device in devices:
-                family = device.get("device_family", "").upper()
-                full_name = device.get("full_device_name", "")
-                if family and full_name:
-                    devices_info[family] = full_name
-        except Exception:
-            logger.debug("Failed to fetch device info from VIPPET /devices API")
-
-    system: dict[str, str] = {}
-    if devices_info.get("CPU"):
-        system["Processor"] = devices_info["CPU"]
-    if devices_info.get("GPU"):
-        system["GPU"] = devices_info["GPU"]
-    if devices_info.get("NPU"):
-        system["NPU"] = devices_info["NPU"]
-
-    return {"system": system}
-
 
 _QUICK_STREAM_COUNTS: set[int] = {1, 3}
 _QUICK_VARIANTS: set[str] = {"CPU", "GPU"}
@@ -102,53 +94,127 @@ _QUICK_VARIANTS: set[str] = {"CPU", "GPU"}
 _PIPELINE_CASES: list[PipelineCase | object] | None = None
 _CASE_IDS: list[str] | None = None
 
+# Console state shared between hooks (single pytest process, no xdist).
+_PREFLIGHT_LINES: list[str] = []
+_MATRIX: Matrix | None = None
+_TERMINAL: Any = None
+_ARTEFACTS: list[tuple[str, Path]] = []
+_ARTEFACT_ERROR: list[str] = []
+_SESSION_DURATION: list[float] = []
+
+_PARAM_ID_RE = re.compile(r"\[(.*)\]$")
+
+
+# --------------------------------------------------------------------------- #
+# Console helpers
+# --------------------------------------------------------------------------- #
+
+
+def _terminal(config: pytest.Config) -> Any:
+    return config.pluginmanager.get_plugin("terminalreporter")
+
+
+def _write_lines(text_or_lines: str | list[str]) -> None:
+    lines = (
+        text_or_lines.splitlines() if isinstance(text_or_lines, str) else text_or_lines
+    )
+    for line in lines:
+        if _TERMINAL is not None:
+            _TERMINAL.write_line(line)
+        else:
+            print(line, file=sys.stderr)
+
+
+def _collect_system_info(devices: Mapping[str, list[str]]) -> dict[str, Any]:
+    """Build the report's system section from the discovered device names."""
+    labels = {"CPU": "Processor", "GPU": "GPU", "NPU": "NPU"}
+    system = {
+        labels[family]: " / ".join(names)
+        for family, names in devices.items()
+        if family in labels and names
+    }
+    return {"system": system}
+
+
+def _results() -> list[dict[str, Any]]:
+    return _RESULTS_COLLECTOR_REF[0] if _RESULTS_COLLECTOR_REF else []
+
+
+# --------------------------------------------------------------------------- #
+# 1. Readiness (header)
+# --------------------------------------------------------------------------- #
+
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_sessionstart() -> None:
+def pytest_sessionstart(session: pytest.Session) -> None:
     """Verify ViPPET readiness once before performance test collection."""
-    run_preflight_or_exit(
+    global _TERMINAL
+    _TERMINAL = _terminal(session.config)
+    _PREFLIGHT_LINES[:] = run_preflight_or_exit(
         BASE_URL,
         READINESS_TIMEOUT_SECONDS,
         POLL_INTERVAL,
         REQUEST_TIMEOUT,
+        on_failure=_write_lines,
     )
+    _load_matrix()
 
 
-def _discover_case_params() -> tuple[list[PipelineCase | object], list[str]]:
-    """Build the filtered matrix and wrap it for ``pytest.mark.parametrize``.
+def pytest_report_header(config: pytest.Config) -> list[str]:
+    """Show effective settings and the pre-flight result under the session header."""
+    return [
+        "ViPPET performance benchmark",
+        *format_settings(SETTINGS, os.environ.get(ENV_CONFIG_ORIGIN)).splitlines(),
+        "Readiness:",
+        *(f"  {line}" for line in _PREFLIGHT_LINES),
+    ]
 
-    Filtering (pipelines / variants / skip lists / host families) is done by
-    :func:`perf_helpers.matrix.build_matrix`; missing-model handling stays in
-    :func:`wrap_cases_for_pytest`.
+
+# --------------------------------------------------------------------------- #
+# 2. Hardware + matrix (after collection)
+# --------------------------------------------------------------------------- #
+
+
+def _load_matrix() -> Matrix:
+    """Discover the matrix once, right after readiness.
+    Runs in ``pytest_sessionstart`` because ``pytest.exit`` raised during
+    module collection is reported as a collection error with a traceback;
+    at session start it terminates cleanly with the given exit code.
     """
+    global _MATRIX
+    if _MATRIX is not None:
+        return _MATRIX
     try:
-        matrix = discover_matrix(MatrixFilters.from_settings(SETTINGS))
-    except Exception:
-        logger.exception("Failed to collect pipeline cases from VIPPET API")
-        skip = pytest.mark.skip(reason=_NO_CASES_REASON)
-        return [pytest.param(None, marks=skip)], ["no-cases"]
-
-    logger.info("Available device families: %s", matrix.available_families)
-    for excl in matrix.excluded:
-        logger.info(
+        _MATRIX = discover_matrix(MatrixFilters.from_settings(SETTINGS))
+    except Exception as exc:
+        logger.debug("Pipeline discovery failed", exc_info=True)
+        _write_lines(_PREFLIGHT_LINES)  # the header is never printed here
+        pytest.exit(
+            discovery_failure_message(BASE_URL, exc),
+            returncode=FATAL_PREFLIGHT_EXIT_CODE,
+        )
+    logger.debug("Available device families: %s", _MATRIX.available_families)
+    for excl in _MATRIX.excluded:
+        logger.debug(
             "Excluded pipeline=%s variant=%s reason=%s (%s)",
             excl.pipeline_id,
             excl.variant,
             excl.reason.value,
             excl.detail,
         )
+    return _MATRIX
 
+
+def _discover_case_params() -> tuple[list[PipelineCase | object], list[str]]:
+    """Wrap the discovered matrix for ``pytest.mark.parametrize``.
+    Filtering (pipelines / variants / skip lists / host families) is done by
+    :func:`perf_helpers.matrix.build_matrix`; missing-model handling stays in
+    :func:`wrap_cases_for_pytest`.
+    """
+    matrix = _load_matrix()
     if not matrix.included:
-        reason = (
-            f"All {len(matrix.excluded)} discovered pipeline/variant case(s) "
-            "were excluded by config or host capabilities. Run the CLI with "
-            "--dry-run to see why."
-            if matrix.excluded
-            else _NO_CASES_REASON
-        )
-        skip = pytest.mark.skip(reason=reason)
+        skip = pytest.mark.skip(reason=no_cases_reason(matrix))
         return [pytest.param(None, marks=skip)], ["no-cases"]
-
     cases = [PipelineCase(**dataclasses.asdict(case)) for case in matrix.included]
     missing = {pid: set(models) for pid, models in matrix.missing_models.items()}
     return wrap_cases_for_pytest(cases, missing)
@@ -205,6 +271,26 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     metafunc.parametrize(["pipeline_case", "stream_count"], params, ids=ids)
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Print discovered hardware and the benchmark matrix after collection."""
+    if _MATRIX is None or _TERMINAL is None:
+        return
+    _TERMINAL.write_sep("-", "discovered hardware")
+    _write_lines(format_hardware(_MATRIX))
+    _TERMINAL.write_sep("-", "benchmark matrix")
+    _write_lines(format_matrix(_MATRIX))
+    _write_lines(
+        f"Selected for this session: {len(session.items)} test(s) "
+        "(after -k/-m and other pytest filters)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
+
+
 @pytest.fixture(scope="session")
 def http_client() -> Generator[httpx.Client, None, None]:
     """Reusable HTTP client for all performance tests."""
@@ -223,22 +309,20 @@ def hw_monitor() -> HardwareMonitor:
 
 
 @pytest.fixture(scope="session")
-def results_collector(
-    request: pytest.FixtureRequest, http_client: httpx.Client
-) -> list[dict[str, Any]]:
+def results_collector(request: pytest.FixtureRequest) -> list[dict[str, Any]]:
     """Session-scoped accumulator that exports results on teardown."""
     results: list[dict[str, Any]] = []
     start_time = time.time()
 
     def _finalize() -> None:
+        total_duration = time.time() - start_time
+        _SESSION_DURATION[:] = [total_duration]
         if not results:
             return
-        total_duration = time.time() - start_time
         benchmark_id = f"bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         output_dir = Path(PERF_RESULTS_DIR) / benchmark_id
-        exporter = ResultExporter(output_dir, formats=RESULT_FORMATS)
 
-        system_info = _collect_system_info(http_client)
+        system_info = _collect_system_info(_MATRIX.devices if _MATRIX else {})
 
         hw_families: dict[str, list[str]] = {}
         for r in results:
@@ -267,17 +351,38 @@ def results_collector(
             "hardware": hw_families,
             "system_info": system_info,
         }
-        exporter.export(result_dict)
-        html_content = generate_html_report([result_dict])
-        html_path = output_dir / f"{benchmark_id}.html"
-        html_path.write_text(html_content)
-        logger.info("Performance report: %s", html_path)
+
+        try:
+            exporter = ResultExporter(output_dir, formats=RESULT_FORMATS)
+            _ARTEFACTS.extend(exporter.export(result_dict))
+            html_path = output_dir / f"{benchmark_id}.html"
+            html_path.write_text(generate_html_report([result_dict]))
+            _ARTEFACTS.append(("HTML", html_path))
+        except OSError as exc:
+            message = (
+                f"could not write benchmark results to {output_dir}: {exc}. "
+                "Why: the directory is not writable or the disk is full. "
+                "What to do: pass a writable --results-dir (PERF_RESULTS_DIR) "
+                "and re-run."
+            )
+            _ARTEFACT_ERROR[:] = [message]
+            pytest.fail(message, pytrace=False)
 
         if CREATE_LATEST_LINK:
             latest_link = Path(PERF_RESULTS_DIR) / "latest"
-            latest_link.unlink(missing_ok=True)
-            latest_link.symlink_to(output_dir.name)
-            logger.info("Latest results symlink: %s", latest_link)
+            try:
+                latest_link.unlink(missing_ok=True)
+                latest_link.symlink_to(output_dir.name)
+                _ARTEFACTS.append(("latest", latest_link))
+            except OSError as exc:
+                message = (
+                    f"results were written, but the 'latest' link {latest_link} "
+                    f"could not be updated: {exc}. Why: the filesystem does not "
+                    "support symlinks or a directory has that name. What to "
+                    "do: re-run with --no-latest-link or remove that path."
+                )
+                _ARTEFACT_ERROR[:] = [message]
+                pytest.fail(message, pytrace=False)
 
     request.addfinalizer(_finalize)
     return results
@@ -317,6 +422,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
     skip_reason = str(call.excinfo.value)
 
     entry = {
+        "test_id": callspec.id,
         "pipeline_name": actual_case.pipeline_name if actual_case else "unknown",
         "pipeline_id": actual_case.pipeline_id if actual_case else "",
         "variant_name": actual_case.device_family if actual_case else "",
@@ -341,3 +447,59 @@ def _bind_results_ref(results_collector: list[dict[str, Any]]) -> None:
     """Bind the results_collector list to the module-level ref for the skip hook."""
     _RESULTS_COLLECTOR_REF.clear()
     _RESULTS_COLLECTOR_REF.append(results_collector)
+
+
+# --------------------------------------------------------------------------- #
+# 3. Per-test status
+# --------------------------------------------------------------------------- #
+
+
+def _report_detail(report: pytest.TestReport) -> str | None:
+    longrepr = report.longrepr
+    if longrepr is None:
+        return None
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:  # (path, line, reason)
+        return str(longrepr[2]).removeprefix("Skipped: ")
+    crash = getattr(longrepr, "reprcrash", None)
+    if crash is not None and getattr(crash, "message", None):
+        return str(crash.message)
+    text = str(longrepr).strip().splitlines()
+    return text[-1] if text else None
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Print one ``[perf]`` status line per finished performance test."""
+    if _TERMINAL is None or "perf" not in report.keywords:
+        return
+    if report.when == "call":
+        outcome = report.outcome
+    elif report.when in ("setup", "teardown") and report.outcome != "passed":
+        outcome = "error" if report.failed else report.outcome
+    else:
+        return
+
+    match = _PARAM_ID_RE.search(report.nodeid)
+    test_id = match.group(1) if match else report.nodeid
+    entry = next((r for r in reversed(_results()) if r.get("test_id") == test_id), None)
+    _write_lines(format_test_line(test_id, outcome, entry, _report_detail(report)))
+
+
+# --------------------------------------------------------------------------- #
+# 4. Summary + artefact paths
+# --------------------------------------------------------------------------- #
+
+
+def pytest_terminal_summary(
+    terminalreporter: Any, exitstatus: int, config: pytest.Config
+) -> None:
+    """Print the benchmark summary followed by the written artefact paths."""
+    if _MATRIX is None or config.option.collectonly:
+        return
+    duration = _SESSION_DURATION[0] if _SESSION_DURATION else None
+    terminalreporter.write_sep("=", "ViPPET performance summary")
+    for line in format_results_summary(_results(), duration).splitlines():
+        terminalreporter.write_line(line)
+    error = _ARTEFACT_ERROR[0] if _ARTEFACT_ERROR else None
+    for line in format_artefacts(_ARTEFACTS, error).splitlines():
+        terminalreporter.write_line(line)
