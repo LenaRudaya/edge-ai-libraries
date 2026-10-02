@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Intel Corporation
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Shared fixtures and console reporting for VIPPET performance benchmark tests.
@@ -21,11 +21,19 @@ from collections.abc import Generator, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 import pytest
 import httpx
 
 from perf_helpers.settings import ENV_CONFIG_ORIGIN, SETTINGS_REMEDY, SettingsError
+from helpers.api_helpers import fetch_devices
+from helpers.pipeline_case_helpers import (
+    SUPPORTED_DEVICE_FAMILIES,
+    PipelineCase,
+)
+
+from perf_helpers.hw_monitor import HardwareMonitor
+from perf_helpers.preflight import run_preflight_or_exit
+from perf_helpers.reporters import ResultExporter, generate_html_report
 
 try:
     from perf_helpers.config import (
@@ -33,14 +41,19 @@ try:
         CREATE_LATEST_LINK,
         METRICS_SAMPLE_INTERVAL,
         METRICS_URL,
+        ON_UNKNOWN_FILTER_ID,
         PERF_RESULTS_DIR,
+        PIPELINE_FILTER,
         POLL_INTERVAL,
         POLL_TIMEOUT,
         READINESS_TIMEOUT_SECONDS,
         REQUEST_TIMEOUT,
         RESULT_FORMATS,
+        SKIP_PIPELINES,
+        SKIP_VARIANTS,
         SETTINGS,
         STREAM_COUNTS,
+        VARIANT_FILTER,
     )
 except SettingsError as exc:
     # Same message and exit code (2) as the CLI instead of a traceback.
@@ -63,6 +76,7 @@ os.environ.setdefault("VIPPET_BASE_URL", BASE_URL)
 os.environ.setdefault("VIPPET_JOB_TIMEOUT_SECONDS", str(POLL_TIMEOUT))
 os.environ.setdefault("VIPPET_JOB_POLL_INTERVAL", str(POLL_INTERVAL))
 
+from helpers.api_helpers import fetch_devices  # noqa: E402
 from helpers.pipeline_case_helpers import (  # noqa: E402
     PipelineCase,
     wrap_cases_for_pytest,
@@ -78,6 +92,7 @@ from perf_helpers.console import (  # noqa: E402
     no_cases_reason,
 )
 from perf_helpers.discovery import discover_matrix  # noqa: E402
+from perf_helpers.matrix import MatrixFilters  # noqa: E402
 from perf_helpers.hw_monitor import HardwareMonitor  # noqa: E402
 from perf_helpers.matrix import Matrix, MatrixFilters  # noqa: E402
 from perf_helpers.preflight import (  # noqa: E402
@@ -143,6 +158,92 @@ def _results() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # 1. Readiness (header)
 # --------------------------------------------------------------------------- #
+
+
+def _unwrap_case(
+    case_param: PipelineCase | object,
+) -> tuple[PipelineCase | None, list[pytest.Mark], bool]:
+    """Return (case, skip_marks, is_skipped) for a raw or pytest.param-wrapped case."""
+    if isinstance(case_param, PipelineCase):
+        return case_param, [], False
+    # pytest.param wrapper (ParameterSet) with .values and .marks attrs
+    wrapped: Any = case_param
+    actual_case = wrapped.values[0]
+    skip_marks = list(wrapped.marks)
+    is_skipped = any(m.name == "skip" for m in skip_marks)
+    return actual_case, skip_marks, is_skipped
+
+
+def _validate_filter_ids(
+    cases: list[PipelineCase | object],
+) -> list[PipelineCase | object]:
+    """Diff configured filter ids against discovered ids.
+
+    Returns synthetic skipped entries for unknown ids when
+    ``ON_UNKNOWN_FILTER_ID == "warn"``. Aborts the session via
+    ``pytest.exit`` when it is ``"fail"`` (the default), naming every
+    bad id and its valid alternatives.
+    """
+    valid_pipeline_ids = sorted(
+        {c.pipeline_id for cp in cases for c, _, _ in [_unwrap_case(cp)] if c}
+    )
+    valid_pipeline_ids_lower = {p.lower() for p in valid_pipeline_ids}
+
+    issues: list[tuple[str, str, list[str]]] = []
+
+    if PIPELINE_FILTER != "*":
+        requested = (
+            PIPELINE_FILTER if isinstance(PIPELINE_FILTER, list) else [PIPELINE_FILTER]
+        )
+        for pid in requested:
+            if pid not in valid_pipeline_ids:
+                issues.append(("benchmark.pipelines", pid, valid_pipeline_ids))
+
+    for pid in SKIP_PIPELINES:
+        if pid.lower() not in valid_pipeline_ids_lower:
+            issues.append(("benchmark.filters.skip_pipelines", pid, valid_pipeline_ids))
+
+    for variant in SKIP_VARIANTS:
+        if variant.upper() not in SUPPORTED_DEVICE_FAMILIES:
+            issues.append(
+                (
+                    "benchmark.filters.skip_variants",
+                    variant,
+                    sorted(SUPPORTED_DEVICE_FAMILIES),
+                )
+            )
+
+    for variant in VARIANT_FILTER:
+        if variant.upper() not in SUPPORTED_DEVICE_FAMILIES:
+            issues.append(
+                ("benchmark.variants", variant, sorted(SUPPORTED_DEVICE_FAMILIES))
+            )
+
+    if not issues:
+        return []
+
+    lines = [
+        f"Unknown id {bad_id!r} in {field}. Valid ids: {valid}"
+        for field, bad_id, valid in issues
+    ]
+    message = "Invalid performance filter configuration:\n" + "\n".join(lines)
+
+    if ON_UNKNOWN_FILTER_ID == "fail":
+        pytest.exit(message, returncode=4)
+
+    logger.warning(message)
+    synthetic: list[PipelineCase | object] = []
+    for field, bad_id, _valid in issues:
+        reason = f"Unknown id {bad_id!r} in {field}; see log for valid ids."
+        bad_case = PipelineCase(
+            case_id=f"invalid_{field.rsplit('.', 1)[-1]}_{bad_id}",
+            pipeline_id=bad_id,
+            variant_id="",
+            device_family="UNKNOWN",
+            pipeline_name=bad_id,
+        )
+        synthetic.append(pytest.param(bad_case, marks=pytest.mark.skip(reason=reason)))
+    return synthetic
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -233,22 +334,18 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if _PIPELINE_CASES is None or _CASE_IDS is None:
         _PIPELINE_CASES, _CASE_IDS = _discover_case_params()
 
+    for invalid_param in _validate_filter_ids(_PIPELINE_CASES):
+        invalid_case, _, _ = _unwrap_case(invalid_param)
+        if invalid_case is None:
+            continue
+        _PIPELINE_CASES.append(invalid_param)
+        _CASE_IDS.append(invalid_case.case_id)
+
     params = []
     ids = []
 
     for case_param, case_id in zip(_PIPELINE_CASES, _CASE_IDS):
-        actual_case: PipelineCase | None = None
-        is_skipped = False
-        skip_marks: list[pytest.Mark] = []
-
-        if isinstance(case_param, PipelineCase):
-            actual_case = case_param
-        else:
-            # pytest.param wrapper (ParameterSet) with .values and .marks attrs
-            wrapped: Any = case_param
-            actual_case = wrapped.values[0]
-            skip_marks = list(wrapped.marks)
-            is_skipped = any(m.name == "skip" for m in skip_marks)
+        actual_case, skip_marks, is_skipped = _unwrap_case(case_param)
 
         for streams in STREAM_COUNTS:
             marks: list[Any] = [pytest.mark.perf]

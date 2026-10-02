@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Intel Corporation
+# SPDX-FileCopyrightText: (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 """Shared configuration constants for VIPPET performance tests.
@@ -10,7 +10,6 @@ the fully resolved YAML to pytest through ``PERF_CONFIG_FILE``, so direct
 """
 
 import os
-from .settings import CONFIG_DIR as CONFIG_DIR
 from .settings import ResolvedSettings, resolve_settings
 
 PERF_CONFIG: str = os.environ.get("PERF_CONFIG", "default")
@@ -37,6 +36,7 @@ MAX_RUNTIME: float = SETTINGS["benchmark.execution.max_runtime"]
 SKIP_PIPELINES: list[str] = SETTINGS["benchmark.filters.skip_pipelines"]
 SKIP_VARIANTS: list[str] = SETTINGS["benchmark.filters.skip_variants"]
 REQUIRE_MODELS: bool = SETTINGS["benchmark.filters.require_models"]
+ON_UNKNOWN_FILTER_ID: str = SETTINGS["benchmark.filters.on_unknown_id"]
 
 # --- results section ---
 PERF_RESULTS_DIR: str = SETTINGS["results.output_dir"]
