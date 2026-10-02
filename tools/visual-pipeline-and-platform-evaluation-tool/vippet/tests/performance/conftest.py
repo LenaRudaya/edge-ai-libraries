@@ -25,7 +25,6 @@ import pytest
 import httpx
 
 from perf_helpers.settings import ENV_CONFIG_ORIGIN, SETTINGS_REMEDY, SettingsError
-from helpers.api_helpers import fetch_devices
 from helpers.pipeline_case_helpers import (
     SUPPORTED_DEVICE_FAMILIES,
     PipelineCase,
@@ -76,11 +75,7 @@ os.environ.setdefault("VIPPET_BASE_URL", BASE_URL)
 os.environ.setdefault("VIPPET_JOB_TIMEOUT_SECONDS", str(POLL_TIMEOUT))
 os.environ.setdefault("VIPPET_JOB_POLL_INTERVAL", str(POLL_INTERVAL))
 
-from helpers.api_helpers import fetch_devices  # noqa: E402
-from helpers.pipeline_case_helpers import (  # noqa: E402
-    PipelineCase,
-    wrap_cases_for_pytest,
-)
+from helpers.pipeline_case_helpers import wrap_cases_for_pytest  # noqa: E402
 from perf_helpers.console import (  # noqa: E402
     discovery_failure_message,
     format_artefacts,
@@ -93,13 +88,9 @@ from perf_helpers.console import (  # noqa: E402
 )
 from perf_helpers.discovery import discover_matrix  # noqa: E402
 from perf_helpers.matrix import MatrixFilters  # noqa: E402
-from perf_helpers.hw_monitor import HardwareMonitor  # noqa: E402
-from perf_helpers.matrix import Matrix, MatrixFilters  # noqa: E402
-from perf_helpers.preflight import (  # noqa: E402
-    FATAL_PREFLIGHT_EXIT_CODE,
-    run_preflight_or_exit,
-)
-from perf_helpers.reporters import ResultExporter, generate_html_report  # noqa: E402
+from perf_helpers.matrix import Matrix  # noqa: E402
+from perf_helpers.preflight import FATAL_PREFLIGHT_EXIT_CODE  # noqa: E402
+
 
 logger = logging.getLogger(__name__)
 
