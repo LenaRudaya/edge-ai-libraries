@@ -6,6 +6,9 @@
 import csv
 import json
 import logging
+import math
+import os
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -183,6 +186,123 @@ class ResultExporter:
                 JSONReporter.save(result, self.output_dir / f"{benchmark_id}.json")
             elif fmt == "csv":
                 CSVReporter.save(result, self.output_dir / f"{benchmark_id}.csv")
+
+
+# ---------------------------------------------------------------------------
+# Result loading (--report-only)
+# ---------------------------------------------------------------------------
+
+MAX_RESULT_JSON_BYTES = 50 * 1024 * 1024
+# Keeps benchmark_id safe to use as a file name: no "..", "/" or "\".
+_BENCHMARK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+class ReportInputError(ValueError):
+    """Raised when a result file cannot be used to build a report."""
+
+
+def resolve_result_json(path: "str | os.PathLike[str]") -> Path:
+    """Resolve ``path`` (file, run directory or symlink) to a single result JSON."""
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise ReportInputError(f"result path not found: {path}") from exc
+
+    if resolved.is_dir():
+        named = resolved / f"{resolved.name}.json"
+        if named.exists():
+            return named
+        matches = sorted(resolved.glob("*.json"))
+        if not matches:
+            raise ReportInputError(
+                f"no result JSON in {resolved}; results must be saved with "
+                "--formats json (results.formats)"
+            )
+        if len(matches) > 1:
+            names = [m.name for m in matches]
+            raise ReportInputError(
+                f"several result JSON files in {resolved}: {names}; "
+                "pass one file explicitly"
+            )
+        return matches[0]
+
+    if resolved.suffix.lower() != ".json":
+        raise ReportInputError(f"expected a .json result file, got {resolved}")
+    return resolved
+
+
+def load_result(path: Path) -> dict[str, Any]:
+    """Load and validate a single result JSON file."""
+    if path.stat().st_size > MAX_RESULT_JSON_BYTES:
+        raise ReportInputError(
+            f"result {path} exceeds the {MAX_RESULT_JSON_BYTES}-byte size limit"
+        )
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportInputError(f"cannot read result {path}: {exc}") from exc
+
+    _validate_result(data, path)
+    return data
+
+
+def _check_test_case(tc: Any, index: int, path: Path) -> None:
+    prefix = f"invalid result {path}: "
+    if not isinstance(tc, dict):
+        raise ReportInputError(f"{prefix}test_cases[{index}] must be an object")
+    for key in ("pipeline_name", "variant_id", "variant_name", "status"):
+        if not isinstance(tc.get(key), str):
+            raise ReportInputError(
+                f"{prefix}test_cases[{index}].{key} must be a string"
+            )
+    streams = tc.get("streams")
+    if isinstance(streams, bool) or not isinstance(streams, int):
+        raise ReportInputError(
+            f"{prefix}test_cases[{index}].streams must be an integer"
+        )
+
+
+def _validate_result(data: Any, path: Path) -> None:
+    prefix = f"invalid result {path}: "
+    if not isinstance(data, dict):
+        raise ReportInputError(f"{prefix}top level must be an object")
+
+    benchmark_id = data.get("benchmark_id")
+    if not isinstance(benchmark_id, str) or not _BENCHMARK_ID_RE.match(benchmark_id):
+        raise ReportInputError(f"{prefix}benchmark_id must be a safe identifier string")
+
+    test_cases = data.get("test_cases")
+    if not isinstance(test_cases, list):
+        raise ReportInputError(f"{prefix}test_cases must be a list")
+    for index, tc in enumerate(test_cases):
+        _check_test_case(tc, index, path)
+
+    if "timestamp" in data and not isinstance(data["timestamp"], str):
+        raise ReportInputError(f"{prefix}timestamp must be a string")
+
+    if "duration_seconds" in data:
+        duration = data["duration_seconds"]
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+        ):
+            raise ReportInputError(f"{prefix}duration_seconds must be a finite number")
+
+    if "summary" in data and not isinstance(data["summary"], dict):
+        raise ReportInputError(f"{prefix}summary must be an object")
+
+    if "hardware" in data:
+        hardware = data["hardware"]
+        if not isinstance(hardware, dict) or not all(
+            isinstance(v, list) and all(isinstance(item, str) for item in v)
+            for v in hardware.values()
+        ):
+            raise ReportInputError(f"{prefix}hardware must map to lists of strings")
+
+    if "system_info" in data and not isinstance(data["system_info"], dict):
+        raise ReportInputError(f"{prefix}system_info must be an object")
 
 
 # ---------------------------------------------------------------------------

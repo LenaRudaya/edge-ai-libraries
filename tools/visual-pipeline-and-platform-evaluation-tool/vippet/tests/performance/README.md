@@ -18,6 +18,7 @@ make test-performance PERF_CONFIG=full   # all variants, 1/3/5/10 streams
 # Extra CLI flags via PERF_ARGS
 make test-performance PERF_ARGS="--dry-run"
 make test-performance PERF_CONFIG=quick PERF_ARGS="--streams 1,5 --pipelines object-detection"
+make test-performance PERF_ARGS="--report-only"   # rebuild HTML from results/latest
 ```
 
 `make test-performance` delegates to the CLI below.
@@ -89,8 +90,28 @@ other case.
 
 #### Report only
 
-`--report-only` is reserved for rebuilding reports from existing results without
-running any jobs. It is not implemented yet and exits with `3`.
+`--report-only` rebuilds the HTML report from saved result JSON. It never
+contacts ViPPET and never runs jobs.
+
+```bash
+python -m perf_helpers.cli --report-only                     # defaults to <results-dir>/latest
+python -m perf_helpers.cli --report-only results/latest
+python -m perf_helpers.cli --report-only results/bench_A/bench_A.json
+python -m perf_helpers.cli --report-only results/bench_A results/bench_B --report-output /tmp/compare.html
+```
+
+- Accepted inputs: a result JSON file, a single run directory, or the
+  `latest` symlink. The whole results folder is not accepted.
+- Several inputs render as one report with several runs; duplicate inputs
+  are ignored.
+- Output location:
+  - one run: overwrites `<run_dir>/<benchmark_id>.html`;
+  - several runs: `<results-dir>/report_YYYYMMDD_HHMMSS.html`;
+  - `--report-output PATH` overrides both.
+- The JSON must have been saved by the run (`json` listed in
+  `results.formats` / `--formats`).
+- Exit codes: `0` on success; `2` for a missing, unreadable or invalid
+  input; `2` for `--report-output` without `--report-only`.
 
 ### Direct pytest
 
@@ -207,3 +228,6 @@ After a run, results are saved to `results/bench_YYYYMMDD_HHMMSS/`:
 - `.json` — structured results (all test cases + HW metrics)
 - `.csv` — flat table for spreadsheet analysis
 - `.html` — interactive Chart.js report with FPS, utilization, and power charts
+
+Rebuild the HTML later with `--report-only` (see [Report only](#report-only)).
+
