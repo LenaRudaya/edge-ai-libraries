@@ -227,8 +227,13 @@ the local virtual environment and that requirements are installed into it.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-openvino.txt \
+    openvino-genai==2026.4.1.0
 ```
+
+`openvino` is not part of `requirements.txt`; it comes from
+`requirements-openvino.txt` and `openvino-genai` on a host (the container image
+gets it from its base image). See [Run On the Host](how-to-guides/run-standalone.md).
 
 If audio loading fails on the host, install `libsndfile1`:
 

@@ -149,7 +149,9 @@ Read [model-and-device-config.md](./references/model-and-device-config.md) first
    same `${REGISTRY}/text-to-speech:${RELEASE_TAG}` so later `up` calls reuse
    the local build), or `docker build -t text-to-speech:local .` directly.
 2. Standalone: install `libsndfile1`, create a venv, `pip install -r
-   requirements.txt`, then `python main.py` (default bind `127.0.0.1:8011`;
+   requirements.txt -r requirements-openvino.txt openvino-genai==2026.4.1.0`
+   (OpenVINO is not in `requirements.txt`; the container gets it from its base
+   image), then `python main.py` (default bind `127.0.0.1:8011`;
    override with `TEXT_TO_SPEECH_SERVER_HOST` / `TEXT_TO_SPEECH_SERVER_PORT`).
 3. Sanity-check imports before starting standalone if startup fails
    mysteriously:

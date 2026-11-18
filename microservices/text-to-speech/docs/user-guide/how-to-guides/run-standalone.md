@@ -23,7 +23,11 @@ From the `text-to-speech/` directory:
 python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+# OpenVINO is provided by the container base image, so it is installed
+# separately for a host environment (keep the openvino-genai version in line
+# with openvino-tokenizers in requirements-openvino.txt).
+pip install -r requirements.txt -r requirements-openvino.txt \
+    openvino-genai==2026.4.1.0
 ```
 
 ### Config

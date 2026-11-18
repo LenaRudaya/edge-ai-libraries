@@ -185,8 +185,12 @@ installed into it:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-openvino.txt \
+    openvino-genai==2026.4.1.0
 ```
+
+OpenVINO is not in `requirements.txt` (the container gets it from its base
+image), so a host install needs the extra requirements above.
 
 If audio loading fails on the host:
 ```bash
