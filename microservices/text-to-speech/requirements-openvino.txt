@@ -1,0 +1,5 @@
+# Installed with --no-deps (see Dockerfile). OpenVINO itself comes from the
+# base image. Newest openvino-tokenizers on PyPI; only its Python code is used,
+# the native extension is loaded from the base image.
+openvino-tokenizers==2026.4.1.0
+optimum-intel==2.1.0

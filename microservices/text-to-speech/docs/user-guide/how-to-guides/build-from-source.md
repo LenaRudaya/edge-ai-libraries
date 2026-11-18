@@ -53,6 +53,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+# The container image gets OpenVINO from its DL Streamer base image, so it is
+# not in requirements.txt. Install it for a standalone environment:
+pip install openvino==2026.1.0 openvino-genai==2026.1.0.0 \
+    openvino-tokenizers==2026.1.0.0 optimum-intel==2.1.0
 python main.py
 ```
 

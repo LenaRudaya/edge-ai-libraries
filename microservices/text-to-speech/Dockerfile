@@ -7,12 +7,17 @@ ARG APP_GID=1000
 
 USER root
 
+# OpenVINO runtime and GenAI come from the DL Streamer base image (via its
+# PYTHONPATH), not from PyPI. openvino-tokenizers (PyPI has no release matching
+# the base image's OpenVINO) must load the base image's native extension, which
+# is built against that runtime; otherwise startup fails with "Couldn't create
+# operation: SentencepieceTokenizer".
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH="" \
     VIRTUAL_ENV=/opt/venv \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    OV_TOKENIZER_PREBUILD_EXTENSION_PATH=/opt/intel/openvino_genai/runtime/lib/intel64/libopenvino_tokenizers.so
 
 WORKDIR /app/text-to-speech
 
@@ -49,15 +54,22 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 
-COPY requirements.txt ./requirements.txt
+COPY requirements.txt requirements-openvino.txt ./
 
+# --no-deps: these packages depend on PyPI `openvino`, which would add a second
+# OpenVINO runtime to the venv.
 RUN python3 -m venv "$VIRTUAL_ENV" \
     && "$VIRTUAL_ENV/bin/pip" install --upgrade pip setuptools \
     && "$VIRTUAL_ENV/bin/pip" install -r requirements.txt \
-    && "$VIRTUAL_ENV/bin/python3" -c "import openvino, openvino_genai, openvino_tokenizers as t; print(openvino.__version__, t.__version__); assert openvino.__file__.startswith('/opt/venv')"
+    && "$VIRTUAL_ENV/bin/pip" install --no-deps -r requirements-openvino.txt
 
 
 COPY . .
+
+# Fail the build if tokenizers does not use the base image's native extension.
+RUN python3 -c "import openvino, openvino_tokenizers as t; \
+assert '/opt/intel/openvino_genai/' in openvino.__file__, openvino.__file__; \
+assert '/opt/intel/openvino_genai/' in str(t._ext_path), t._ext_path"
 
 # Ensure all relevant directories exist and contain a .keep file so Docker copies ownership
 RUN mkdir -p /app/text-to-speech/models/openvino \
